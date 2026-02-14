@@ -6,114 +6,140 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from torchvision import models
 import torch.nn as nn
+from typing import Tuple, Dict, List
 
-def get_densenet_model(num_classes=8):
-    """Carga la arquitectura exacta que pide el archivo .pth"""
+# --- CONFIGURACIÓN DE ESTILO CORPORATIVO ---
+MED_COLORS = {'primary': '#1a5276', 'alert': '#cb4335', 'neutral': '#ebedef', 'text': '#2c3e50'}
+plt.rcParams['font.family'] = 'sans-serif'
+
+def get_densenet_model(num_classes: int = 8) -> nn.Module:
+    """
+    Carga la arquitectura DenseNet121 optimizada para radiografía de tórax.
+    Estructura adaptada para compatibilidad con pesos preentrenados específicos.
+    """
     model = models.densenet121(weights=None)
     num_ftrs = model.classifier.in_features
     
-    # Según el error, el modelo guardado tiene una capa intermedia de 512 
-    # y termina en una capa '3'. Vamos a recrear esa estructura:
+    # Arquitectura personalizada: Capa densa -> ReLU -> Dropout -> Salida
     model.classifier = nn.Sequential(
-        nn.Linear(num_ftrs, 512),      # Esta es la capa que mide 512
-        nn.ReLU(),                     # Capa 1
-        nn.Dropout(0.2),               # Capa 2
-        nn.Linear(512, num_classes)    # Esta es la capa '3' (final)
+        nn.Linear(num_ftrs, 512),
+        nn.ReLU(),
+        nn.Dropout(0.2),
+        nn.Linear(512, num_classes)
     )
     return model
 
-def get_medical_cam(model, image_tensor, target_class_idx):
-    """Grad-CAM Manual: Evita errores de Hook e Inplace en DenseNet."""
+def get_medical_cam(model: nn.Module, image_tensor: torch.Tensor, target_class_idx: int) -> np.ndarray:
+    """
+    Algoritmo Grad-CAM optimizado para DenseNet.
+    Genera un mapa de activación de clase para transparencia diagnóstica.
+    """
     model.eval()
     
-    # 1. Extraemos las características manualmente hasta la última capa convolucional
-    # image_tensor debe tener requires_grad=True
     with torch.enable_grad():
-        features = model.features(image_tensor) # (1, 1024, 7, 7)
+        # Extracción de activaciones de la última capa convolucional
+        features = model.features(image_tensor) 
         features = features.detach().requires_grad_(True)
         
-        # 2. Pasamos esas características por el clasificador
-        # Necesitamos simular el Global Average Pooling y el Linear
+        # Simulación de paso por clasificador
         out = F.adaptive_avg_pool2d(features, (1, 1))
         out = torch.flatten(out, 1)
         out = model.classifier(out)
         
         score = out[:, target_class_idx]
-        
-        # 3. Calculamos gradientes de la puntuación respecto a las CARACTERÍSTICAS
         model.zero_grad()
         score.backward()
         
-        grads = features.grad.detach() # Aquí están los gradientes
+        grads = features.grad.detach()
         activations = features.detach()
 
-    # 4. Global Average Pooling de los gradientes (importancia de cada canal)
+    # Ponderación de canales por importancia de gradiente
     weights = torch.mean(grads, dim=(2, 3), keepdim=True)
-    
-    # 5. Mapa de calor (combinación lineal)
     cam = torch.sum(weights * activations, dim=1).squeeze().cpu().numpy()
     
-    # ReLU y Normalización
+    # Procesamiento del Heatmap
     cam = np.maximum(cam, 0)
     if np.max(cam) > 0:
         cam = cam / np.max(cam)
     
     return cv2.resize(cam, (224, 224))
 
-def show_medical_report(model, image, label_names, device='cpu'):
+def show_medical_report(model: nn.Module, image: torch.Tensor, label_names: List[str], device: str = 'cpu') -> Tuple[plt.Figure, Dict]:
+    """
+    Genera un reporte visual de grado médico.
+    Filtra hallazgos por relevancia clínica (>20% confianza).
+    """
     model.to(device)
     model.eval()
     
     input_tensor = image.unsqueeze(0).to(device)
     
-    # 1. Predicción rápida (sin gradientes para evitar líos)
+    # 1. Inferencia
     with torch.no_grad():
         output = model(input_tensor)
         probs = torch.sigmoid(output)[0].cpu().numpy()
     
-    top_idx = np.argmax(probs)
+    # 2. Filtrado de Hallazgos (Umbral de relevancia médica)
+    THRESHOLD = 0.20
+    results_dict = {label_names[i]: float(probs[i]) for i in range(len(label_names))}
+    significant_findings = {k: v for k, v in results_dict.items() if v >= THRESHOLD}
     
-    # 2. Mapa de calor con el método manual (maneja sus propios gradientes)
+    top_idx = np.argmax(probs)
     input_tensor.requires_grad = True
     heatmap = get_medical_cam(model, input_tensor, top_idx)
     
-    # 3. Generamos el mapa de calor CON EL NUEVO MÉTODO
-    heatmap = get_medical_cam(model, input_tensor, top_idx)
+    # 3. Visualización Estilo DashBoard Médico
+    fig = plt.figure(figsize=(14, 8), facecolor='white')
+    gs = gridspec.GridSpec(2, 2, width_ratios=[1, 1.2], height_ratios=[1, 1])
     
-    # --- A partir de aquí, tu código de Matplotlib ---
-    fig = plt.figure(figsize=(16, 10), facecolor='#f8f9fa')
-    gs = gridspec.GridSpec(2, 2, width_ratios=[1, 1.2])
-    
-    # Imagen Original
+    # A. Imagen Original
     ax0 = fig.add_subplot(gs[0, 0])
     img_np = image.permute(1, 2, 0).cpu().numpy()
     img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
     ax0.imshow(img_np, cmap='bone')
-    ax0.set_title("ORIGINAL X-RAY", fontweight='bold')
+    ax0.set_title("VISTA RADIOGRÁFICA ORIGINAL", fontsize=10, fontweight='bold', color=MED_COLORS['text'])
     ax0.axis('off')
 
-    # Mapa de Calor (AI FOCUS)
+    # B. AI Focus (Grad-CAM)
     ax1 = fig.add_subplot(gs[1, 0])
     ax1.imshow(img_np, cmap='bone')
+    # Usamos mapa de color 'jet' pero con transparencia controlada
     heatmap_colored = plt.cm.jet(heatmap)
-    heatmap_colored[heatmap < 0.1] = 0 # Filtro suave de ruido
-    ax1.imshow(heatmap_colored, alpha=0.4)
-    ax1.set_title(f"AI FOCUS: {label_names[top_idx].upper()}", color='red', fontweight='bold')
+    heatmap_colored[heatmap < 0.15] = 0 
+    ax1.imshow(heatmap_colored, alpha=0.35)
+    ax1.set_title(f"ZONA DE INTERÉS: {label_names[top_idx].upper()}", fontsize=10, color=MED_COLORS['alert'], fontweight='bold')
     ax1.axis('off')
 
-    # Gráfico de Barras
+    # C. Análisis de Confianza Diagnóstica
     ax2 = fig.add_subplot(gs[:, 1])
     y_pos = np.arange(len(label_names))
-    colors = ['#d32f2f' if p > 0.5 else '#1976d2' for p in probs]
-    bars = ax2.barh(y_pos, probs, color=colors, edgecolor='black')
-    ax2.set_yticks(y_pos)
-    ax2.set_yticklabels(label_names, fontweight='bold')
-    ax2.invert_yaxis()
-    ax2.axvline(x=0.5, color='#fbc02d', linestyle='--', label='Clinical Alarm')
     
+    # Colores dinámicos: Rojo si supera el 50% (Crítico), Azul si es significativo, Gris el resto
+    bar_colors = []
+    for p in probs:
+        if p > 0.5: bar_colors.append(MED_COLORS['alert'])
+        elif p >= THRESHOLD: bar_colors.append(MED_COLORS['primary'])
+        else: bar_colors.append(MED_COLORS['neutral'])
+    
+    bars = ax2.barh(y_pos, probs, color=bar_colors, height=0.6)
+    ax2.set_yticks(y_pos)
+    ax2.set_yticklabels(label_names, fontsize=10, fontweight='bold', color=MED_COLORS['text'])
+    ax2.invert_yaxis()
+    ax2.set_xlim(0, 1.0)
+    
+    # Línea de umbral clínico
+    ax2.axvline(x=THRESHOLD, color=MED_COLORS['text'], linestyle='--', alpha=0.3, label='Clinical Threshold')
+    
+    # Etiquetas de porcentaje
     for bar in bars:
-        ax2.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2, 
-                 f'{bar.get_width():.1%}', va='center', fontweight='bold')
+        width = bar.get_width()
+        ax2.text(width + 0.02, bar.get_y() + bar.get_height()/2, 
+                 f'{width:.1%}', va='center', fontsize=9, fontweight='bold', 
+                 color=MED_COLORS['text'] if width >= THRESHOLD else '#95a5a6')
+
+    ax2.set_title("ÍNDICE DE CONFIANZA POR PATOLOGÍA", fontsize=12, fontweight='bold', pad=20)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
     
     plt.tight_layout()
-    return fig, probs
+    return fig, significant_findings

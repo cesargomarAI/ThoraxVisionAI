@@ -28,9 +28,14 @@ def load_ai_model():
     return model, device
 
 # --- SIDEBAR ---
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2497/2497143.png", width=100) # Un icono médico
-st.sidebar.title("ThoraxVision Control")
-st.sidebar.markdown("---")
+with st.sidebar:
+    try:
+        logo = Image.open("logo.png")
+        st.image(logo, use_container_width=True)
+    except:
+        st.title("🏥 ThoraxVision AI")
+    
+    st.divider()
 st.sidebar.info("Este sistema utiliza Deep Learning (DenseNet121) para asistir en el cribado radiológico.")
 
 

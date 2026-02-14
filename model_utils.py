@@ -142,4 +142,4 @@ def show_medical_report(model: nn.Module, image: torch.Tensor, label_names: List
     ax2.spines['right'].set_visible(False)
     
     plt.tight_layout()
-    return fig, significant_findings
+    return fig, probs
